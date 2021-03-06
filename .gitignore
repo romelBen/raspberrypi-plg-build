@@ -1,0 +1,7 @@
+# Confidential files
+*.pem
+vagrant
+*.log
+.vscode/*
+inventory
+.env
