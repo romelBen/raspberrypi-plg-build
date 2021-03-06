@@ -1,0 +1,20 @@
+---
+- hosts: pi_clients
+  become: yes
+  tasks:
+    - name: Copy directory (for docker-compose) to remote host
+      copy:
+        src: /home/romelben/Documents/infrastructure_projects/scripting-projects/docker-compose/plg-compose
+        dest: /home/romelben
+
+    # Run Docker Swarm on manager on the host (only has one referred to as manager)
+    - name: Initialize Docker Swarm on host
+      docker_swarm:
+        state: present
+
+    - name: Deploy stack from a compose file
+      docker_stack:
+        state: present
+        name: monitoring-stack
+        compose:
+          - /home/romelben/plg-compose/docker-compose.yml

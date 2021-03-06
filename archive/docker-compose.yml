@@ -1,0 +1,530 @@
+version: '3.7'
+
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
+  alert_manager: {}
+  grafana: {}
+  portainer_data:
+  # Creates a volume to store the certificates. The constraint is to make sure traefik
+  # always deploys to the same Docker node with the same volume containing the HTTPS certificates
+  traefik-public-certificates:
+#  sonarqube_conf:
+#  sonarqube_extensions:
+#  sonarqube_logs:
+#  sonarqube_data:
+#  sonarqube_db:
+
+# Uploads the files necessary for the configurement of Prometheus, Node Exporter
+# and Alert Manager
+configs:
+  prom_rules:
+    file: /home/romelben/plg-compose/prometheus/prometheus.yml
+  alert_rules:
+    file: /home/romelben/plg-compose/prometheus/alert.rules
+
+networks:
+  traefik-public:
+    driver: overlay
+    attachable: true # If network traefik-public has been created, use attachable = true to attach desired containers
+#    name: traefik-public
+  monitor-hub:
+    driver: overlay
+    attachable: true # If network monitor-hub has been created, use attachable = true to attach desired containers
+#    name: monitor-hub
+
+services:
+# 1ST CONTAINER
+  ### Traefik is a load balancer and HTTP reverse proxy that allows deploying microservices much easier
+  ### when it comes to containerization. To the many clients it supports, here is documentation for
+  ### containerization of Docker: https://doc.traefik.io/traefik/providers/docker/
+  ### Here is general documentation on Traefik's command setup: https://doc.traefik.io/traefik/
+  traefik:
+    image: arm64v8/traefik
+    command:
+      # Enable Docker in traefik so that is can read labels from the Docker services
+      - --providers.docker
+      # Add a constraint to ONLY use services with the label "traefik.constraint-label=traefik-public"
+      - --providers.docker.constraints=Label(`traefik.constraint-label`, `traefik-public`)
+      # Do not expose all Docker services, only ones explicitly exposed
+      - --providers.docker.exposedbydefault=false
+      # Enable Docker Swarm mode
+      - --providers.docker.swarmmode
+      # Create an entrypoint "http" listening on port 80
+      - --entrypoints.http.address=:80
+      # Create an entrypoint "https" listening on port 443
+      - --entrypoints.https.address=:443
+      # Create the certificate resolver "le" for Let's Encrypt, uses the environment variable EMAIL
+      - --certificatesresolvers.le.acme.email=${EMAIL}
+      # Store the Let's Encrypt certificates in the mounted volume
+      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
+      # Use the TLS challenge for Let's Encrypt
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      # Enable access logs with HTTP requests
+      - --accesslog
+      # Enable the traefik log for configuration and errors
+      - --log
+      # Enable the dashboard and API
+      - --api
+      # Prometheus metrics exporter type
+      - --metrics.prometheus=true
+      # Buckets for latency metrics
+      - --metrics.prometheus.buckets=0.1,0.3,1.2,5.0
+    networks:
+      - traefik-public
+      - monitor-hub
+    volumes:
+      # Add Docker as a mounted volume so traefik can read the labels of other services
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount the volume to store the certificates
+      - traefik-public-certificates:/certificates
+      # Traefik configurations
+#      - ./traefik.toml:/traefik.toml
+    ports:
+      # Use "mode: host" for Traefik to listen directly for the Client IP
+      # which Traefik provides `X-Forwarded-For` or `X-Real-IP`
+      - target: 80 # HTTP access
+        published: 80
+        mode: host
+      - target: 443 # HTTPS access
+        published: 443
+        mode: host
+    deploy:
+      placement:
+        constraints:
+          # Make traefik run only on the node with this label
+          # as the node with it has the volume for the certificate
+          - node.labels.traefik-public.traefik-public-certificates == true
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+      labels:
+        # Enable traefik for this service, makes it available in the public network
+        - traefik.enable=true
+        # Use traefik-public network
+        - traefik.docker.network=traefik-public
+        # This public traefik will use services with this bale
+        - traefik.constraint-label=traefik-public
+        # Middleware HTTP Basic authentication
+        # Using the environment variables USERNAME and HASHED_PASSWORD
+        - traefik.http.middlewares.admin-auth.basicauth.users=${USERNAME}:${HASHED_PASSWORD}
+        # Middleware to redirect HTTP to HTTPS traffic. (It can be re-used in other stack)
+        - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
+        # traefik-http set up only to use the middleware to redirect to https
+        # Uses the environment variable DOMAIN
+        - traefik.http.routers.traefik-public-http.rule=Host(`web.${DOMAIN}`)
+        - traefik.http.routers.traefik-public-http.entrypoints=http
+        - traefik.http.routers.traefik-public-http.middlewares=https-redirect
+        # Here we route the traffic using HTTPS for traefik-https
+        # Uses the environment variable DOMAIN
+        - traefik.http.routers.traefik-public-https.rule=Host(`web.${DOMAIN}`)
+        - traefik.http.routers.traefik-public-https.entrypoints=https
+        - traefik.http.routers.traefik-public-https.tls=true
+        # Use the special traefik service api@internal with the web UI/dashboard
+        - traefik.http.routers.traefik-public-https.service=api@internal
+        # Use the "le" (Let's Encrypt) resolver created
+        - traefik.http.routers.traefik-public-https.tls.certresolver=le
+        # Enable HTTP Basic auth, using the middleware created
+        - traefik.http.routers.traefik-public-https.middlwares=admin-auth
+        # Define the port inside of the Docker service to use
+        - traefik.http.services.traefik-public.loadbalancer.server.port=8080
+
+# 2ND CONTAINER
+  ### Grafana is a visual platform for monitoring data that is categorized by supported platforms
+  ### The current services that are used are Prometheus, Node Exporter, and cAdvisor.
+  ### In the future I would like to implement Promtail and Loki into Grafana to monitor logs in one
+  ### holistic tool.
+  grafana:
+    image: grafana/grafana-arm64v8-linux
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring
+    networks:
+      - traefik-public
+      - monitor-hub
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role==manager
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        - traefik.http.routers.grafana-http.rule=Host(`grafana.${DOMAIN}`)
+        - traefik.http.routers.grafana-http.entrypoints=http
+        - traefik.http.routers.grafana-http.middlewares=https-redirect
+        - traefik.http.routers.grafana-https.rule=Host(`grafana.${DOMAIN}`)
+        - traefik.http.routers.grafana-https.entrypoints=https
+        - traefik.http.routers.grafana-https.tls=true
+        - traefik.http.routers.grafana-https.tls.certresolver=le
+        - traefik.http.services.grafana.loadbalancer.server.port=3000
+      restart_policy:
+        condition: on-failure
+
+# 3RD CONTAINER
+  ### Prometheus scrapes and stores time series data (by default) for 15 days and supports client libraries
+  ### that enable it to work with other services. It even boasts PromQL to query data.
+  prometheus:
+    image: prom/prometheus-linux-arm64
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention=${PROMETHEUS_RETENTION:-24}"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    configs:
+      - source: prom_rules
+        target: /home/romelben/plg-compose/prometheus/prometheus.yml
+      - source: alert_rules
+        target: /home/romelben/plg-compose/prometheus/alert.rules
+    networks:
+      - traefik-public
+      - monitor-hub
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 128M
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        # HTTP configuration for Prometheus
+        - traefik.http.routers.prometheus-http.rule=Host(`prometheus.${DOMAIN}`)
+        - traefik.http.routers.prometheus-http.entrypoints=http
+        - traefik.http.routers.prometheus-http.middlewares=https-redirect
+        # HTTPS configuration for Prometheus
+        - traefik.http.routers.prometheus-https.rule=Host(`prometheus.${DOMAIN}`)
+        - traefik.http.routers.prometheus-https.entrypoints=https
+        - traefik.http.routers.prometheus-https.tls=true
+        - traefik.http.routers.prometheus-https.tls.certresolver=le
+        - traefik.http.services.prometheus.loadbalancer.server.port=9090
+        - traefik.http.middlewares.prometheus-auth.basicauth.users=${ADMIN_USER}:${HASHED_PASSWORD}
+        - traefik.http.routers.prometheus-https.middlewares=prometheus-auth
+
+# 4TH CONTAINER
+  ### Node exporter collects data on where it is installed. (ONLY collects from Linux distros.) Once the agent has been
+  ### installed, node exporter begins to collect data of hardware metrics (i.e. CPU Usage, Memory, etc.)
+  ### For testing purposes, the host is the localhost. If you want to use node exporter on different services,
+  ### change the "net", "pid", and "/:/host:ro,".
+  ### Documentation can be found here: https://github.com/prometheus/node_exporter
+  node-exporter:
+    image: prom/node-exporter-linux-arm64
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      - /etc/hostname:/etc/nodename
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.ignored-mount-points"
+      - "--collector.textfile.directory=/etc/node-exporter/"
+      - "--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)"
+      - "--no-collector.ipvs"
+#      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    networks:
+      - traefik-public
+      - monitor-hub
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+# 5TH CONTAINER
+  ### Alert manager is connected to Prometheus if there are abnormalities that need to be fixed.
+  ### This container needs to be configured a bit more on what to alert in file alertmanager/config.yml
+  alertmanager:
+    image: prom/alertmanager-linux-arm64
+    volumes:
+      - "./alertmanager/:/etc/alertmanager/"
+    networks:
+      - traefik-public
+      - monitor-hub
+    command:
+      - "--config.file=/etc/alertmanager/config.yml"
+      - "--storage.path=/alertmanager"
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role==manager
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      # HTTP section for configuration
+      - traefik.http.routers.alertmanager-http.rule=Host(`alertmanager.${DOMAIN}`)
+      - traefik.http.routers.alertmanager-http.entrypoints=http
+      - traefik.http.routers.alertmanager-http.middlewares=https-redirect
+      # HTTPS section for configuration
+      - traefik.http.routers.alertmanager-https.rule=Host(`alertmanager.${DOMAIN}`)
+      - traefik.http.routers.alertmanager-https.entrypoints=https
+      - traefik.http.routers.alertmanager-https.tls=true
+      - traefik.http.routers.alertmanager-https.tls.certresolver=le
+      - traefik.http.services.alertmanager.loadbalancer.server.port=9093
+      - traefik.http.middlewares.alertmanager-auth.basicauth.users=${ADMIN_USER}:${HASHED_PASSWORD}
+      - traefik.http.routers.alertmanager-https.middlewares=alertmanager-auth
+
+# 6TH CONTAINER
+  ### CloudFlare DNS is needed if your IP address IS dynamic. If your IP address is static then disregard
+  ### this service. An API key (token) is created in CloudFlare which will ping CloudFlare
+  ### whenever the dynamic IP address changes
+  cloudflare-ddns:
+    image: oznu/cloudflare-ddns:arm64v8
+    restart: always
+    environment:
+      - API_KEY=${CF_API_KEY}
+      - ZONE=${DOMAIN}
+#      - SUBDOMAIN=${SUBDOMAIN}
+      - PROXIED=true
+
+# 7TH CONTAINER
+### Portainer allows for easy access to Docker Containers, Docker Swarm, and Kubernetes.
+### Great documentation can be found here: https://github.com/portainer/portainer-compose
+### Currently needs work to setup with traefik.
+  portainer:
+    image: portainer/portainer-ce:linux-arm64
+    command: -H unix:///var/run/docker.sock
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+        - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role==manager
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.constraint-label=traefik-public
+      # HTTP configuration for Portainer
+      - traefik.http.routers.portainer-http.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.portainer-http.entrypoints=http
+      - traefik.http.routers.portainer-http.middlewares=https-redirect
+      # HTTPS configuration for Portainer
+      - traefik.http.routers.portainer-https.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.portainer-https.entrypoints=https
+      - traefik.http.routers.portainer-https.tls=true
+      - traefik.http.routers.portainer-https.tls.certresolver=le
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+
+# 8TH CONTAINER
+### Watchtower will detect if any linked containers have a new image available.
+### If a new image is available, Watchtower will automatically update and restart
+### each container with the assigned up-to-date image.
+  watchtower:
+    image: containrrr/watchtower:arm64v8-latest
+    command:
+      - "--cleanup"
+      - "--schedule"
+      - "* * 3 * * 6"
+    restart: always
+    networks:
+      - traefik-public
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+# 9TH CONTAINER
+### cAdvisor provides container users an understanding of the resource usage and performance
+### characteristics of running instances. This will collect, aggregate, process, and export information
+  cadvisor:
+    image: zcube/cadvisor
+    networks:
+      - traefik-public
+    command:
+      - --logtostderr
+      - --docker_only
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /var/run:/var/run
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+################## These containers still need to be worked on #####################
+# 10TH CONTAINER
+  ### Jenkins can be used for Continuous Integration (CI) for automation with triggering, testing,
+  ### and deployment of created codes jobs automatically.
+  ### Need to setup with traefik so it's not yet prepared
+#  jenkins:
+#    image: jenkins4eval/jenkins:latest-arm64
+#    privileged: true
+#    user: root
+#    ports:
+#      - 8083:8080
+#      - 50003:5000
+#    networks:
+#      - traefik-public
+#    volumes:
+#      - ~/jenkins_data:/var/jenkins_home
+#      - /var/run/docker.sock:/var/run/docker.sock
+#      - /usr/local/bin/docker:/usr/local/bin/docker
+#    labels:
+#      - "traefik.docker.network=traefik-public"
+#      - "traefik.enable=true"
+#      - "traefik.http.routers.jenkins.rule=Host(`<enter URL here>`)"
+#      - "traefik.frontend.entryPoints=http,https"
+
+# 11TH CONTAINER
+######## HOME SERVER ############
+### NextCloud is an alternative to Google Drive, Google Photos, OneDrive, and Dropbox.
+### This gives security where you, the user, are in control of your files and photos
+### to secure.
+#  nextcloud:
+#    image: arm64v8/nextcloud
+#    restart: always
+#    networks:
+#      - traefik-public
+#    depends_on:
+#      - db
+#      - redis
+#      - watchtower
+#    labels:
+#      - "traefik.http.routers.nextcloud.middlewares=nextcloud,nextcloud_redirect"
+#      - "traefik.http.routers.nextcloud.tls.certresolver=myresolver"
+#      - "traefik.http.routers.nextcloud.rule=Host(`<enter URL here>`)"
+#      - traefik.http.middlewares.nextcloud.headers.customFrameOptionsValue=ALLOW-FROM https://mydomain.com
+#      - traefik.http.middlewares.nextcloud.headers.contentSecurityPolicy=frame-ancestors 'self' mydomain.com *.mydomain.net
+#      - traefik.http.middlewares.nextcloud.headers.stsSeconds=155520011
+#      - traefik.http.middlewares.nextcloud.headers.stsIncludeSubdomains=true
+#      - traefik.http.middlewares.nextcloud.headers.stsPreload=true
+#      - traefik.http.middlewares.nextcloud_redirect.redirectregex.regex=/.well-known/(card|cal)dav
+#      - traefik.http.middlewares.nextcloud_redirect.redirectregex.replacement=/remote.php/dav/
+#    environment:
+#      - POSTGRES_DB=nextcloud
+#      - POSTGRES_USER=${DB_USER}
+#      - POSTGRES_PASSWORD=${DB_PASSWORD}
+#      - POSTGRES_HOST=db
+#      - NEXTCLOUD_ADMIN_USER=admin
+#      - NEXTCLOUD_ADMIN_PASSWORD=adminpass
+#      - REDIS_HOST=redis
+#      - NEXTCLOUD_TRUSTED_DOMAINS=<enter URL here>
+#      - TRUSTED_PROXIES=172.18.0.0/16
+#    volumes:
+#      - ./data/volumes/nextcloud/html:/var/www/html
+
+# 12TH CONTAINER
+####### DATABASE #########
+### PostgreSQL container for database queries and storage. I love it. It's better than all databases,
+### especially MS-SQL.
+#  db:
+#    image: arm64v8/postgres
+#    networks:
+#      - traefik-public
+#    environment:
+#      - POSTGRES_USER=${DB_USER}
+#      - POSTGRES_PASSWORD=${DB_PASSWORD}
+#      - POSTGRES_MULTIPLE_DATABASES=nextcloud
+#    volumes:
+#      - /home/romelben/plg-compose/scripts/multiple-postgre-db-creation.sh:/docker-entrypoint-initdb.d
+#      - ./data/volumes/postgresql:/var/lib/postgresql/
+#      - sonarqube_db:/var/lib/postgresql/data
+#      - nextcloud-db:/var/lib/postgresql/data
+
+# 13TH CONTAINER
+####### CACHE DATABASE #########
+### Redis is an in-memory data structure that has extremely powerful caching capabilities. Redis provides built-in
+### replication, high availability and automatic partitioning.
+#  redis:
+#    image: arm64v8/redis
+#    ports:
+#      - "6379:6379"
+#    networks:
+#      - traefik-public
+#    volumes:
+#      - ./data/volumes/redis:/data
+#    labels:
+#      - "traefik.enable=false"
+#    deploy:
+#      placement:
+#        constraints:
+#          - node.role==manager
+
+# 14TH CONTAINER
+######### Sonarqube container does NOT SUPPORT arm64/v8 as of Jan. 21, 2021 ######################
+### Sonarqube allows for code quality and code security, NOT QA testing. You would need to use Selenium
+### to be able to accomplish this. Nevertheless, Sonarqube is a great tool to analyze issues and maintain
+### clean code.
+#  sonarqube:
+#    image: sonarqube:7.7-community
+#    environment:
+#      - sonar.jdbc.username=sonar
+#      - sonar.jdbc.password=mypass
+#      - sonar.jdbc.url=jdbc:postgresql://db:5432/sonarqube
+#    volumes:
+#      - sonarqube_conf:/opt/sonarqube/conf
+#      - sonarqube_extensions:/opt/sonarqube/extensions
+#      - sonarqube_logs:/opt/sonarqube/logs
+#      - sonarqube_data:/opt/sonarqube/data
+#    labels:
+#      - "traefik.enable=true"
+#      - "traefik.http.routers.sonarqube.rule=Host(`<enter URL here>`)"
+#      - "traefik.http.routers.sonarqube.entrypoints=websecure"
+#      - "traefik.http.routers.sonarqube.tls.certresolver=omega_httpchallenge"
+
+# 15TH CONTAINER
+######### Jellyfin container currently has an UNSTABLE version of arm64/v8 as of Jan. 21, 2021 ######################
+### Jellyfin is a media server that can host movies, TV series, and music on multiple devices.
+### Here is documentation on how to setup Jellyfin with Docker: https://jellyfin.org/docs/general/administration/installing.html#docker
+### Currently needs work to setup with traefik.
+#  jellyfin:
+#    image: jellyfin/jellyfin
+#    labels:
+#      - traefik.enable=true
+#      - traefik.http.routers.jellyfin.entryPoints=secure # Entry point where Jellyfin is accessible via a specific port
+#      - traefik.http.routers.jellyfin.rule=Host(`<enter URL here>`)
+#      - traefik.http.routers.network.entrypoints=traefik
+#    container_name: jellyfin
+#    user: 1000:1000
+#    network_mode: "host"
+#    volumes:
+#      - /path/to/config:/config
+#      - /path/to/cache:/cache
+#      - /path/to/media:/media
+#      - /path/to/media2:/media2:ro
+#    restart: "always"
+#    environment:

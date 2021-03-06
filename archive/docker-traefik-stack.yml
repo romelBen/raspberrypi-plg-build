@@ -1,0 +1,391 @@
+version: "3"
+
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
+  sonarqube_conf:
+  sonarqube_extensions:
+  sonarqube_logs:
+  sonarqube_data:
+  sonarqube_db:
+  portainer_data:
+
+networks:
+  nextcloud-www:    # This will connect any local volumes to NextCloud
+    driver: local
+  nextcloud-db:     # This will connect NextCloud to the PostgreSQL database
+    driver: local
+  redis:            # Redis will cache any read queries from NextCloud
+    driver: local
+  nextcloud:        # This will allow NextCloud to work in an external network
+    external: true
+#  letsencrypt:     # Let's Encrypt can be useful if you didn't create a URL. However, I did. This would only be recommended if you did not.
+#    driver: local
+  monitor-net:
+    driver: overlay
+    name: inbound
+  traefik:
+    driver: overlay
+    name: traefik
+  frontend:
+  backend:
+
+services:
+  ### Traefik is a load balancer and HTTP reverse proxy that allows deploying microservices much easier
+  ### when it comes to containerization. To the many clients it supports, here is documentation for
+  ### containerization of Docker: https://doc.traefik.io/traefik/providers/docker/
+  ### Here is general documentation on Traefik's command setup: https://doc.traefik.io/traefik/
+  traefik:
+    image: traefik:latest
+    command:
+      - "--log.level=DEBUG" # Sets the level of logs from traefik
+      - "--api"
+      - "--metrics"
+      - "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0"
+      - "--docker"
+      - "--docker.swarmMode"
+      - "--docker.domain=docker.localhost"
+      - "--docker.watch"
+      - "--providers.docker=true"                                                     # Enables docker as the provider for traefik
+      - "--providers.docker.exposedbydefault=false"                                   # Don't expose every container to traefik, only expose enabled ones
+      - "--entrypoints.traefik.address=:80"                                           # Defines an entrypoint for port :80 named traefik
+      - "--entrypoints.websecure.address=:443"
+#      - "--certificatesresolvers.omega_resolver.acme.httpchallenge=true"             # This command and below are for setting up SSL information
+#      - "--certificatesresolvers.omega_resolver.acme.httpchallenge.entrypoint=web"
+#      - "--certificatesresolvers.omega_resolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+#      - "--certificatesresolvers.omega_resolver.acme.email=bilgin@mysite.com"        # Set your email address here, is for the generation of SSL certificates with Let's Encrypt.
+#      - "--certificatesresolvers.omega_resolver.acme.storage=/letsencrypt/acme.json"
+    networks:
+      - traefik
+      - monitor-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro          # Volume for docker admin
+      - /root/traefik/letsencrypt:/letsencrypt
+      - ./acme.json:/acme.json                                # SSL certificates stored
+      - ./traefik.toml:/traefik.toml                          # Traefik configurations
+    ports:
+      - target: 80 # http access
+        published: 80
+        mode: host
+      - target: 443 # https access
+        published: 443
+        mode: host
+      - target: 8080 # This is where the dashboard runs on
+        published: 8080
+        protocol: tcp
+        mode: ingress
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true" # Enable traefik on itself to view dashboard and assign subdomain to view it
+        - "traefik.frontend.rule=Host:${TRAEFIK_DOMAINS}; PathPrefixStrip:/traefik"
+        - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"
+        - "traefik.http.routers.http-catchall.entrypoints=web"
+        - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+        - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+  ### Prometheus scrapes and stores time series data (by default) for 15 days and supports client libraries
+  ### that enable it to work with other services. It even boasts PromQL to query data.
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    networks:
+      - monitor-net
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      labels:
+        - "traefik.frontend.rule=Host:prometheus.localhost"
+        - "traefik.backend=prometheus"
+        - "traefik.port=9090"
+        - "traefik.docker.network=traefik"
+      restart_policy:
+        condition: on-failure
+
+  ### Node exporter collects data on where it is installed. (ONLY collects from Linux distros.) Once the agent has been
+  ### installed, node exporter begins to collect data of hardware metrics (i.e. CPU Usage, Memory, etc.)
+  ### For testing purposes, the host is the localhost. If you want to use node exporter on different services,
+  ### change the "net", "pid", and "/:/host:ro,".
+  ### Documentation can be found here: https://github.com/prometheus/node_exporter
+  node-exporter:
+    image: prom/node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100
+    networks:
+      - monitor-net
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+
+  ### Alert manager is connected to Prometheus if there are abnormalities that need to be fixed.
+  ### This container needs to be configured a bit more on what to alert in file alertmanager/config.yml
+  alertmanager:
+    image: prom/alertmanager
+    ports:
+      - 9093:9093
+    volumes:
+      - "./alertmanager/:/etc/alertmanager/"
+    networks:
+      - monitor-net
+    command:
+      - "--config.file=/etc/alertmanager/config.yml"
+      - "--storage.path=/alertmanager"
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      restart_policy:
+        condition: on-failure
+
+  ### cAdvisor is a tool used to monitor resource usage and performance of running containers. It collects, aggregates, processes,
+  ### and exports information on running containers.
+  ### Currently has issues which need to be fixed.
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - 8088:8080
+    networks:
+      - monitor-net
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+
+  ### Grafana is a visual platform for monitoring data that is categorized by supported platforms
+  ### The current services that are used are Prometheus, Node Exporter, and cAdvisor.
+  ### In the future I would like to implement Promtail and Loki into Grafana to monitor logs in one
+  ### holistic tool.
+  grafana:
+    image: grafana/grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring
+    networks:
+      - monitor-net
+    user: "472"
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.network.rule=Host(`monitor.eos-helios-selene.com`)"
+        - "traefik.backend=grafana"
+        - "traefik.port=3000"
+        - "traefik.docker.network=traefik"
+      restart_policy:
+        condition: on-failure
+
+########## MEDIA CENTER #########
+### Jellyfin is a media server that can host movies, TV series, and music on multiple devices.
+### Here is documentation on how to setup Jellyfin with Docker: https://jellyfin.org/docs/general/administration/installing.html#docker
+### Currently needs work to setup with traefik.
+  jellyfin:
+    image: jellyfin/jellyfin
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.jellyfin.entryPoints=secure # Entry point where Jellyfin is accessible via a specific port
+      - traefik.http.routers.jellyfin.rule=Host(`music.eos-helios-selene.com`)
+      - traefik.http.routers.network.entrypoints=traefik
+    container_name: jellyfin
+    user: 1000:1000
+    network_mode: "host"
+    volumes:
+      - /path/to/config:/config
+      - /path/to/cache:/cache
+      - /path/to/media:/media
+      - /path/to/media2:/media2:ro
+    restart: "always"
+    environment:
+
+### CloudFlare DNS is needed if your IP address IS dynamic. If your IP address is static then disregard
+### this service. An API key (token) is created in CloudFlare which will ping CloudFlare
+### whenever the dynamic IP address changes
+  cloudflare-ddns:
+    image: oznu/cloudflare-ddns:latest
+    restart: always
+    environment:
+      - API_KEY=0PZKaUd577TasK0Dw4UwglDJdNJ6rKJw1hn8ZkWF
+      - ZONE=eos-helios-selene.com
+      - SUBDOMAIN=monitor
+      - PROXIED=true
+
+######## CI Tool ###########
+### Jenkins can be used for Continuous Integration (CI) for automation with triggering, testing,
+### and deployment of created codes jobs automatically.
+### Need to setup with traefik so it's not yet prepared
+  jenkins:
+    image: jenkins/jenkins:lts
+    privileged: true
+    user: root
+    ports:
+      - 8083:8080
+      - 50003:5000
+    container_name: jenkins-master
+    volumes:
+      - ~/jenkins_data:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/local/bin/docker:/usr/local/bin/docker
+    labels:
+      - "traefik.docker.network=traefik"
+      - "traefik.enable=true"
+      - "traefik.frontend.rule=Host:${`jenkins.eos-helios-selene.com`}"
+      - "traefik.frontend.entryPoints=http,https"
+
+######## HOME SERVER ############
+### NextCloud is an alternative to Google Drive, Google Photos, OneDrive, and Dropbox.
+### This gives security where you, the user, are in control of your files and photos
+### to secure.
+  nextcloud:
+    image: nextcloud:latest
+    restart: always
+    networks:
+      - traefik
+    depends_on:
+      - db
+      - redis
+    lables:
+      - traefik.http.routers.nextcloud.middlewares=nextcloud,nextcloud_redirect
+      - traefik.http.routers.nextcloud.tls.certresolver=myresolver
+      - traefik.http.routers.nextcloud.rule=Host(`nextcloud.eos-helios-selene.com`)
+#      - traefik.http.middlewares.nextcloud.headers.customFrameOptionsValue=ALLOW-FROM https://mydomain.com
+#      - traefik.http.middlewares.nextcloud.headers.contentSecurityPolicy=frame-ancestors 'self' mydomain.com *.mydomain.net
+#      - traefik.http.middlewares.nextcloud.headers.stsSeconds=155520011
+#      - traefik.http.middlewares.nextcloud.headers.stsIncludeSubdomains=true
+#      - traefik.http.middlewares.nextcloud.headers.stsPreload=true
+#      - traefik.http.middlewares.nextcloud_redirect.redirectregex.regex=/.well-known/(card|cal)dav
+#      - traefik.http.middlewares.nextcloud_redirect.redirectregex.replacement=/remote.php/dav/
+    environment:
+      - POSTGRES_DB=nextcloud
+      - POSTGRES_USER=master
+      - POSTGRES_PASSWORD=mypass
+      - POSTGRES_HOST=db
+      - NEXTCLOUD_ADMIN_USER=admin
+      - NEXTCLOUD_ADMIN_PASSWORD=adminpass
+      - REDIS_HOST=redis
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud.eos-helios-selene.com
+      - TRUSTED_PROXIES=172.18.0.0/16
+    volumes:
+      - nextcloud-www:/var/www/html
+
+####### DATABASE #########
+### PostgreSQL container for database queries and storage. I love it. It's better than all databases,
+### especially MS-SQL.
+  db:
+    image: postgres:13
+    networks:
+      - traefik
+    environment:
+      - POSTGRES_DB=sonarqube
+      - POSTGRES_DB=nextcloud
+      - POSTGRES_USER=master
+      - POSTGRES_PASSWORD=mypass
+    volumes:
+      - sonarqube_db:/var/lib/postgresql/data
+      - nextcloud-db:/var/lib/postgresql/data
+
+####### CACHE DATABASE #########
+### Redis is an in-memory data structure that has extremely powerful caching capabilities. Redis provides built-in
+### replication, high availability and automatic partitioning.
+  redis:
+    image: redis:latest
+    restart: always
+    networks:
+      - traefik
+    volumes:
+      - redis:/var/lib/redis
+
+### Sonarqube allows for code quality and code security, NOT QA testing. You would need to use Selenium
+### to be able to accomplish this. Nevertheless, Sonarqube is a great tool to analyze issues and maintain
+### clean code.
+  sonarqube:
+    image: sonarqube:7.7-community
+    environment:
+      - sonar.jdbc.username=sonar
+      - sonar.jdbc.password=mypass
+      - sonar.jdbc.url=jdbc:postgresql://db:5432/sonarqube
+    volumes:
+      - sonarqube_conf:/opt/sonarqube/conf
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_data:/opt/sonarqube/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sonarqube.rule=Host(`sonar.eos-helios-selene.com`)"
+      - "traefik.http.routers.sonarqube.entrypoints=websecure"
+      - "traefik.http.routers.sonarqube.tls.certresolver=omega_httpchallenge"
+
+### Portainer allows for easy access to Docker Containers, Docker Swarm, and Kubernetes.
+### Great documentation can be found here: https://github.com/portainer/portainer-compose
+### Currently needs work to setup with traefik.
+  portainer:
+    image: portainer/portainer-ce:2.0.0
+    command: -H unix:///var/run/docker.sock
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    labels:
+      # Frontend
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`portainer.eos-helios-selene.com`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.services.frontend.loadbalancer.server.port=9000"
+      - "traefik.http.routers.frontend.service=frontend"
+      - "traefik.http.routers.frontend.tls.certresolver=leresolver"
+      # Edge
+      - "traefik.http.routers.edge.rule=Host(`edge.yourdomain.com`)"
+      - "traefik.http.routers.edge.entrypoints=websecure"
+      - "traefik.http.services.edge.loadbalancer.server.port=8000"
+      - "traefik.http.routers.edge.service=edge"
+      - "traefik.http.routers.edge.tls.certresolver=leresolver"
+
+### Watchtower will detect if any linked containers have a new image available.
+### If a new image is available, Watchtower will automatically update and restart
+### each container with the assigned up-to-date image.
+  watchtower:
+    image: v2tec/watchtower:latest
+    command:
+      - "--cleanup"
+      - "--scheudle"
+      - "--0 0 0 * * *"
+    restart: always
+    networks:
+      - backend
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

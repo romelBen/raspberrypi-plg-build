@@ -1,0 +1,33 @@
+# config file version
+apiVersion: 1
+
+# list of datasources that should be deleted from the database
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+# List of datasources to insert/update depending on whats available in the database
+datasources:
+- name: Prometheus
+  type: prometheus
+  access: proxy
+  orgId: 1
+  url: http://prometheus:9090
+  isDefault: true
+  version: 1
+  editable: true
+#  password:
+#  user:
+#  database:
+#  basicAuth: false
+#  basicAuthUser:
+#  basicAuthPassword:
+#  withCredentials:
+#  jsonData:
+#     graphiteVersion: "1.1"
+#     tlsAuth: false
+#     tlsAuthWithCACert: false
+#  secureJsonData:
+#    tlsCACert: "..."
+#    tlsClientCert: "..."
+#    tlsClientKey: "..."

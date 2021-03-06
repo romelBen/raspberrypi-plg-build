@@ -1,0 +1,108 @@
+---
+### This script is important to connect to your Raspberry Pi since it will have issues connecting
+### without no secure password. This will create your SSH directory and copy your localhost private
+### key over to your Raspberry Pi's.
+### IMPORTANT: The playbook should be typed as such "ansible-playbook -k -i inventory setup-ssh-key.yml"
+### The "-k" is used for inputting the password since the Raspberry Pi will NOT block access.
+
+- name: Make sure to have a 'wheel' group
+  group:
+    name: wheel
+    state: present
+
+- name: Allow 'wheel' group to have a passwordless sudo
+  lineinfile:
+    path: /etc/sudoers
+    state: present
+    regexp: '^%wheel'
+    line: '%wheel ALL=(ALL) NOPASSWD: ALL'
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Create a new regular user with sudo privileges
+  user:
+    name: "{{ created_user }}"
+    state: present
+    group: wheel
+    append: true
+    create_home: true
+    shell: /bin/bash
+
+- name: Create an SSH directory
+  file:
+    path: /$HOME/"{{ created_user }}"/.ssh
+    state: directory
+    mode: '0700'
+
+- name: Set authorized key from localhost
+  authorized_key:
+    user: "{{ created_user }}"
+    state: present
+    key: "{{ copy_local_key }}"
+
+- name: Disable password authentication for root
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    state: present
+    regexp: '^#?PermitRootLogin'
+    line: 'PermitRootLogin prohibit-password'
+
+- name: Ensure required packages are installed for Docker
+  apt:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ required_packages }}"
+
+- name: Check if Docker is already present.
+  command: which docker
+  failed_when: false
+  changed_when: false
+  register: docker_command_result
+
+- name: Download Docker install convenience script.
+  get_url:
+    url: https://get.docker.com/
+    dest: /tmp/get-docker.sh
+    mode: 0775
+  when: docker_command_result.rc == 1
+
+- name: Run Docker install convenience script.
+  command: /tmp/get-docker.sh
+  environment:
+    CHANNEL: stable
+  when: docker_command_result.rc == 1
+
+- name: Make sure Docker CE is the version specified.
+  apt:
+    name: "docker-ce={{ docker_version }}"
+    state: present
+    force: true
+    install_recommend: "{{ docker_install_recommends }}"
+
+# Shim for Docker 18.09.0 on Debian Stretch.
+- import_tasks: docker-1809-shim.yml
+  when:
+    - ansible_service_mgr == 'systemd'
+    - "'18.09.0' in docker_version"
+
+- name: Ensure Docker is started.
+  service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Ensure pip installs the required packages listed
+  pip:
+    name: "{{ pip_install_packages }}"
+    version: "{{ item.version | default(omit) }}"
+    virtualenv: "{{ item.virtualenv | default(omit) }}"
+    state: "{{ item.state | default(omit) }}"
+    executable: pip3
+  with_items: "{{ pip_install_packages }}"
+
+- name: Ensure docker users are added to the docker group.
+  user:
+    name: "{{ item }}"
+    groups:
+      - docker
+    append: true
+  with_items: "{{ created_user }}"

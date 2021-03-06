@@ -1,0 +1,39 @@
+---
+######## Docker Variables ###############
+docker_version_armv7: 5:20.10.2~3-0~raspbian-buster
+docker_version_arm64: 5:20.10.2~3-0~debian-buster
+
+# Check available versions on a Pi: `apt-cache madison docker-ce`
+docker_version: "{{ docker_version_armv7 if 'armv7' in ansible_architecture else docker_version_arm64 }}"
+
+# Whether to install recommended packages alongside docker-ce.
+docker_install_recommends: false
+
+# Whether to install Docker Compose via Pip.
+docker_install_compose: true
+
+# Required Docker packages to install to get Docker-Compose to work
+required_packages:
+  - python3-pip
+  - python3-dev
+  - libffi-dev
+  - libssl-dev
+  - build-essential
+  - gcc
+  - libc-dev
+  - make
+  - curl
+#  - firewalld
+
+######### Pip Setup Variables ##########
+# Packages to install with pip
+pip_install_packages:
+  - docker-compose
+  - jsondiff
+
+########## Raspberry Pi Setup for User ############
+created_user: romelben
+copy_local_key: "{{ lookup('file', '/home/$USER/.ssh/id_rsa.pub') }}"
+
+########## FirewallD Variables ##########
+allowed_ssh_networks:

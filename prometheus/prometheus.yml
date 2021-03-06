@@ -1,0 +1,68 @@
+# Here is where your global configurations are implemented
+global:
+  scrape_interval:     15s # By default, scrape targets every 15 seconds.
+  evaluation_interval: 15s # By default, scrape targets every 15 seconds.
+
+  # Attach these labels to any time series or alerts when communicating with
+  # external systems (federation, remote storage, Alertmanager).
+  external_labels:
+      monitor: 'my-project'
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+rule_files:
+  - 'alert.rules'
+  # - "first.rules"
+  # - "second.rules"
+
+# Here is where your alerts will be used with Prometheus
+alerting:
+  alertmanagers:
+  - scheme: http
+    static_configs:
+    - targets:
+      - "alertmanager:9093"
+
+# Here we have different job names which will "scrape" through our metrics for data. We currently
+# have Raspberry Pi hosting node_exporter (which creates metrics for Linux) and Traefik
+scrape_configs:
+  - job_name: 'prometheus'
+    # Override the global default and scrape targets from this job every 5 seconds.
+    scrape_interval: 5s
+    static_configs:
+         - targets: ['localhost:9090'] # Enter the IP address of the target host you would want to monitor (Prometheus)
+  - job_name: 'node_exporter'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:9100']    # Enter the IP address of the target host you would want to monitor (Node Exporter)
+  - job_name: 'traefik'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:8080']    # Enter the IP address of the target host you would want to monitor (Traefik)
+  - job_name: 'cadvisor'
+    scrape_interval: 5s
+    dns_sd_configs:
+    - names:
+      - 'tasks.cadvisor'
+      type: 'A'
+      port: 8080
+
+### This should ONLY be used when you define each task for node exporter to to pull data from
+#  - job_name: 'node-exporter'
+#    scrape_interval: 5s
+#    dns_sd_configs:
+#    - names:
+#      - 'tasks.node-exporter'
+#      type: 'A'
+#      port: 9100
+
+#  - job_name: 'pushgateway'
+#    scrape_interval: 10s
+#    dns_sd_configs:
+#    - names:
+#      - 'tasks.pushgateway'
+#      type: 'A'
+#      port: 9091
+
+#     static_configs:
+#          - targets: ['node-exporter:9100']
+
