@@ -13,8 +13,14 @@ The containers that will be installed on your Raspberry Pi are these:
 - Loki (in the works)
 
 ## Environment Setup
-In directory [ansible-setup] (https://github.com/romelBen/devop_projects/tree/master/scripting-projects/docker-compose/plg-compose/ansible-setup), you will find two scripts that will setup your environment:
-`master-playbook.yml` which setups your environment with the required libraries for docker and docker-compose, and `deploy-stack.yml` which transfers this folder and runs the stack over on your desired hosts.
+In directory [ansible-setup](https://github.com/romelBen/devop_projects/tree/master/scripting-projects/docker-compose/plg-compose/ansible-setup), you will find two ansible scripts which will setup your environment:
+- `master-playbook.yml` will setup your environment with the required libraries for docker and docker-compose
+- `deploy-stack.yml` will be the final step which will transfer the this folder over to your desired host and run the stack
 
 Whenever you make a change to the `docker-compose.yml` file, `deploy-stack.yml` will be your go-to file
 to send changes to your desired hosts.
+
+## Note
+I am currently looking into setting up my docker containers to be more secured since they suffer from two distinct security issues:
+- When a docker container is created, the permissions are set for all to use. In other words, Docker containers are set with root privileges. This is a big no no.
+- Also, the distro that you use will punch a hole right through your defenses. It is suggested to configure `firewalld` or `iptables`. There are issues when it comes to using `firewalld` which is discussed in this blog: [Secure Docker with iptables firewall and Ansible](https://ryandaniels.ca/blog/secure-docker-with-iptables-firewall-and-ansible/). So I am following Ryan Daniels approach to securing `iptables` in the Docker environment.
