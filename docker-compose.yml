@@ -6,9 +6,6 @@ volumes:
   alert_manager: {}
   grafana: {}
   portainer_data:
-  # Creates a volume to store the certificates. The constraint is to make sure traefik
-  # always deploys to the same Docker node with the same volume containing the HTTPS certificates
-  traefik-public-certificates:
 
 # Uploads the files necessary for the configurement of Prometheus, Node Exporter
 # and Alert Manager
@@ -18,15 +15,19 @@ configs:
   alert_rules:
     file: /home/romelben/plg-compose/prometheus/alert.rules
 
+#### IMPORTANT: You must create the network first or you will get an error:
+#### "sudo docker network create --diver=overlay traefik-public"
+# When using docker-composes network, diver "overlay" to enable-host communication.
+# Here is documentation on multi-host networking: https://docs.docker.com/network/network-tutorial-overlay/
 networks:
   traefik-public:
-    driver: overlay
-    attachable: true # If network traefik-public has been created, use attachable = true to attach desired containers
     name: traefik-public
-  monitor-hub:
-    driver: overlay
-    attachable: true # If network monitor-hub has been created, use attachable = true to attach desired containers
-    name: monitor-hub
+    driver: external # Use "external" if there is a pre-existing network.
+    attachable: true
+#  monitor-hub:
+#    name: monitor-hub
+#    driver: overlay
+#    attachable: true # If network monitor-hub has been created, use attachable = true to attach desired containers
 
 services:
 # 1ST CONTAINER
@@ -55,71 +56,77 @@ services:
           - node.labels.traefik-public.traefik-public-certificates == true
       labels:
         # Enable traefik for this service, makes it available in the public network
-        - traefik.enable=true
+        traefik.enable: true
+        # Middleware redirect
+        traefik.http.middlewares.https-redirect.redirectscheme.scheme: https
+
+        # Redirection HTTP to HTTPS
+        traefik.http.routers.traefik-public-http.rule: Host(`${DOMAIN}`)
+        traefik.http.routers.traefik-public-http.entrypoints: http
+        traefik.http.routers.traefik-public-http.middlewares: https-redirect
+
+        # Dashboard
+        traefik.http.routers.traefik.rule: Host(`traefik.${DOMAIN}`)
+        traefik.http.routers.traefik.entrypoints: https
+        traefik.http.routers.traefik.service: api@internal
+        traefik.http.routers.traefik.tls: true
+        traefik.http.routers.traefik.tls.certresolver: le
+        traefik.http.routers.traefik.tls.domains[0].main: "${HOST}"
+        traefik.http.routers.traefik.tls.domains[0].sans: "*.${HOST}"
+
+        traefik.http.routers.traefik.middlewares: dashboard
+        traefik.http.middlewares.dashboard.basicauth.users: ${DASHBOARD_USER}:${DASHBOARD_PASSWORD} # gather from .env
+
         # Use traefik-public network
-        - traefik.docker.network=traefik-public
+        traefik.docker.network: traefik-public
         # This public traefik will use services with this bale
-        - traefik.constraint-label=traefik-public
-        # Middleware HTTP Basic authentication
-        # Using the environment variables USERNAME and HASHED_PASSWORD
-        - traefik.http.middlewares.admin-auth.basicauth.users=${USERNAME}:${HASHED_PASSWORD}
-        # Middleware to redirect HTTP to HTTPS traffic. (It can be re-used in other stack)
-        - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
-        - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
-        # traefik-http set up only to use the middleware to redirect to https
-        # Uses the environment variable DOMAIN
-        - traefik.http.routers.traefik-public-http.rule=Host(`web.${DOMAIN}`)
-        - traefik.http.routers.traefik-public-http.entrypoints=http
-        - traefik.http.routers.traefik-public-http.middlewares=https-redirect
-        # Here we route the traffic using HTTPS for traefik-https
-        # Uses the environment variable DOMAIN
-        - traefik.http.routers.traefik-public-https.rule=Host(`web.${DOMAIN}`)
-        - traefik.http.routers.traefik-public-https.entrypoints=https
-        - traefik.http.routers.traefik-public-https.tls=true
-        # Use the special traefik service api@internal with the web UI/dashboard
-        - traefik.http.routers.traefik-public-https.service=api@internal
-        # Use the "le" (Let's Encrypt) resolver created
-        - traefik.http.routers.traefik-public-https.tls.certresolver=le
-        # Enable HTTP Basic auth, using the middleware created
-        - traefik.http.routers.traefik-public-https.middlwares=admin-auth
+        traefik.constraint-label: traefik-public
         # Define the port inside of the Docker service to use
-        - traefik.http.services.traefik-public.loadbalancer.server.port=8080
+#        - traefik.http.services.traefik-public.loadbalancer.server.port=8080
+    environment:
+      - ${PROVIDER_ENV_FILE}=/provider.key
     command:
-      # Enable Docker in traefik so that is can read labels from the Docker services
-      - --providers.docker=true
-      # Add a constraint to ONLY use services with the label "traefik.constraint-label=traefik-public"
-      - --providers.docker.constraints=Label(`traefik.constraint-label`, `traefik-public`)
-      # Do not expose all Docker services, only ones explicitly exposed
+      - --providers.docker
+      - --providers.docker.network=traefik-public
       - --providers.docker.exposedByDefault=false
-      # Enable Docker Swarm mode
       - --providers.docker.swarmMode=true
-      # Create an entrypoint "http" listening on port 80
+      # Add a constraint to ONLY use services with the label "traefik.constraint-label=traefik-public"
+#      - --providers.docker.constraints=Label(`traefik.constraint-label`, `traefik-public`)
       - --entryPoints.http.address=:80
-      # Create an entrypoint "https" listening on port 443
       - --entryPoints.https.address=:443
-      # Create the certificate resolver "le" for Let's Encrypt, uses the environment variable EMAIL
-      - --certificatesresolvers.le.acme.email=${EMAIL}
-      # Store the Let's Encrypt certificates in the mounted volume
-      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
-      # Use the TLS challenge for Let's Encrypt
-      - --certificatesresolvers.le.acme.tlschallenge=true
-      # Enable access logs with HTTP requests
-      - --accesslog
-      # Enable the traefik log for configuration and errors
+      - --providers.file.filename=/etc/traefik/certs.toml
       - --log.level=DEBUG
-      # Enable the dashboard and API
-      - --api.dashboard=true
+      - --api
+
+      # Cert resolvers section
+      - --certificatesresolvers.le.acme.caserver=${CA_SERVER}
+      - --certificatesresolvers.le.acme.email=${EMAIL}
+      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
+      - --certificatesResolvers.le.acme.tlsChallenge=${TLS_CHALLENGE}
+      - --certificatesResolvers.le.acme.dnsChallenge=${DNS_CHALLENGE}
+      - --certificatesResolvers.le.acme.dnsChallenge.provider=${PROVIDER}
+      - --certificatesResolvers.le.acme.dnsChallenge.resolvers=1.1.1.1:53,8.8.8.8:53
+
+      # Writing logs to a file
+      - --log.filePath=/logs/traefik.log
+      # Supports common (Common Log Format) or json
+      - --log.format=${LOG_FORMAT:-true}
+      # Configure a bugger for 100 lines for logs
+      - --accesslog=${ACCESSLOG:-true}
+      - --accesslog.filepath=/logs/access.log
+      - --accesslog.bufferingsize=${ACCESSLOG_BUFFERINGSIZE:-100}
+
       # Prometheus metrics exporter type
 #      - --metrics.prometheus=true
       # Buckets for latency metrics
 #      - --metrics.prometheus.buckets=0.1,0.3,1.2,5.0
     volumes:
-      # Add Docker as a mounted volume so traefik can read the labels of other services
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Mount the volume to store the certificates
-      - traefik-public-certificates:/certificates
-      # Traefik configurations
-#      - ./traefik.toml:/traefik.toml
+      - "${CERT_PATH}:/certs"
+      - "${ACME_PATH}:/acme.json"
+      - "${CONFIG_PATH}:/etc/traefik"
+      - "${LOG_PATH:-./logs}:/logs"
+      - "${PROVIDER_ENV_FILE_VALUE}:/provider.key:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
 
 # # 2ND CONTAINER
 #   ### Grafana is a visual platform for monitoring data that is categorized by supported platforms

@@ -1,5 +1,5 @@
 ---
-- hosts: pi_clients
+- hosts: pi_master
   become: yes
   tasks:
     - name: Copy directory (for docker-compose) to remote host
@@ -7,10 +7,12 @@
         src: /home/romelben/Documents/infrastructure_projects/scripting-projects/docker-compose/plg-compose
         dest: /home/romelben
 
-    # Run Docker Swarm on manager on the host (only has one referred to as manager)
+    # Run Docker Swarm manager on the host (only has one referred to as manager)
     - name: Initialize Docker Swarm on host
       docker_swarm:
         state: present
+
+    # Then join the other nodes you would want to incorporate
 
     - name: Deploy stack from a compose file
       docker_stack:

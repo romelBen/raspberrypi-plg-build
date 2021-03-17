@@ -1,5 +1,5 @@
 ---
-- hosts: pi_clients
+- hosts: pi_master
   become: yes
   roles:
     - docker

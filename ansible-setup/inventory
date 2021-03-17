@@ -1,9 +1,16 @@
-[pi_clients]
+[pi_master]
 192.168.1.24
-192.168.1.25
-192.168.1.26
 
-[pi_clients:vars]
+[pi_nodes]
+192.168.1.22
+192.168.1.24
+
+[pi_master:vars]
+ansible_ssh_user = pi
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[pi_nodes:vars]
 ansible_ssh_user = pi
 ansible_python_interpreter=/usr/bin/python3
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'

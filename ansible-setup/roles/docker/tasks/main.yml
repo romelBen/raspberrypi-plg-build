@@ -33,7 +33,7 @@
     state: directory
     mode: '0700'
 
-- name: Set authorized key from localhost
+- name: Set authorized key from localhost to hosts
   authorized_key:
     user: "{{ created_user }}"
     state: present
@@ -50,6 +50,7 @@
   apt:
     name: "{{ item }}"
     state: present
+    update_cache: true
   loop: "{{ required_packages }}"
 
 - name: Check if Docker is already present.
@@ -58,14 +59,14 @@
   changed_when: false
   register: docker_command_result
 
-- name: Download Docker install convenience script.
+- name: Download Docker install convenience script
   get_url:
     url: https://get.docker.com/
     dest: /tmp/get-docker.sh
     mode: 0775
   when: docker_command_result.rc == 1
 
-- name: Run Docker install convenience script.
+- name: Run Docker install convenience script
   command: /tmp/get-docker.sh
   environment:
     CHANNEL: stable
@@ -76,7 +77,7 @@
     name: "docker-ce={{ docker_version }}"
     state: present
     force: true
-    install_recommend: "{{ docker_install_recommends }}"
+    install_recommends: "{{ docker_install_recommends }}"
 
 # Shim for Docker 18.09.0 on Debian Stretch.
 - import_tasks: docker-1809-shim.yml
