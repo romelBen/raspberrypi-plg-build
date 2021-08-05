@@ -31,102 +31,44 @@ networks:
 
 services:
 # 1ST CONTAINER
-  ### Traefik is a load balancer and HTTP reverse proxy that allows deploying microservices much easier
-  ### when it comes to containerization. To the many clients it supports, here is documentation for
-  ### containerization of Docker: https://doc.traefik.io/traefik/providers/docker/
-  ### Here is general documentation on Traefik's command setup: https://doc.traefik.io/traefik/
-  traefik:
-    image: arm64v8/traefik
-    networks:
-      - traefik-public
+  ### Nginx Proxy Manager is a load balancer and reverse proxy which will be used for our home project. It allows
+  ### SSL encryption and proxying of our services as well as a cool interface to interact with our services!
+  ### Nginx Proxy Manager will be contained in a container using MySQL as the database.
+  ### Page of service: https://nginxproxymanager.com/setup/#running-on-raspberry-pi-arm-devices
+  app:
+    image: 'jc21/nginx-proxy-manager:latest'
+    restart: unless-stopped
     ports:
-      # Use "mode: host" for Traefik to listen directly for the Client IP
-      # which Traefik provides `X-Forwarded-For` or `X-Real-IP`
-      - target: 80 # HTTP access
-        published: 80
-        mode: host
-      - target: 443 # HTTPS access
-        published: 443
-        mode: host
-    deploy:
-      placement:
-        constraints:
-          # Make traefik run only on the node with this label
-          # as the node with it has the volume for the certificate
-          - node.labels.traefik-public.traefik-public-certificates == true
-      labels:
-        # Enable traefik for this service, makes it available in the public network
-        traefik.enable: true
-        # Middleware redirect
-        traefik.http.middlewares.https-redirect.redirectscheme.scheme: https
-
-        # Redirection HTTP to HTTPS
-        traefik.http.routers.traefik-public-http.rule: Host(`${DOMAIN}`)
-        traefik.http.routers.traefik-public-http.entrypoints: http
-        traefik.http.routers.traefik-public-http.middlewares: https-redirect
-
-        # Dashboard
-        traefik.http.routers.traefik.rule: Host(`traefik.${DOMAIN}`)
-        traefik.http.routers.traefik.entrypoints: https
-        traefik.http.routers.traefik.service: api@internal
-        traefik.http.routers.traefik.tls: true
-        traefik.http.routers.traefik.tls.certresolver: le
-        traefik.http.routers.traefik.tls.domains[0].main: "${HOST}"
-        traefik.http.routers.traefik.tls.domains[0].sans: "*.${HOST}"
-
-        traefik.http.routers.traefik.middlewares: dashboard
-        traefik.http.middlewares.dashboard.basicauth.users: ${DASHBOARD_USER}:${DASHBOARD_PASSWORD} # gather from .env
-
-        # Use traefik-public network
-        traefik.docker.network: traefik-public
-        # This public traefik will use services with this bale
-        traefik.constraint-label: traefik-public
-        # Define the port inside of the Docker service to use
-#        - traefik.http.services.traefik-public.loadbalancer.server.port=8080
-    environment:
-      - ${PROVIDER_ENV_FILE}=/provider.key
-    command:
-      - --providers.docker
-      - --providers.docker.network=traefik-public
-      - --providers.docker.exposedByDefault=false
-      - --providers.docker.swarmMode=true
-      # Add a constraint to ONLY use services with the label "traefik.constraint-label=traefik-public"
-#      - --providers.docker.constraints=Label(`traefik.constraint-label`, `traefik-public`)
-      - --entryPoints.http.address=:80
-      - --entryPoints.https.address=:443
-      - --providers.file.filename=/etc/traefik/certs.toml
-      - --log.level=DEBUG
-      - --api
-
-      # Cert resolvers section
-      - --certificatesresolvers.le.acme.caserver=${CA_SERVER}
-      - --certificatesresolvers.le.acme.email=${EMAIL}
-      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
-      - --certificatesResolvers.le.acme.tlsChallenge=${TLS_CHALLENGE}
-      - --certificatesResolvers.le.acme.dnsChallenge=${DNS_CHALLENGE}
-      - --certificatesResolvers.le.acme.dnsChallenge.provider=${PROVIDER}
-      - --certificatesResolvers.le.acme.dnsChallenge.resolvers=1.1.1.1:53,8.8.8.8:53
-
-      # Writing logs to a file
-      - --log.filePath=/logs/traefik.log
-      # Supports common (Common Log Format) or json
-      - --log.format=${LOG_FORMAT:-true}
-      # Configure a bugger for 100 lines for logs
-      - --accesslog=${ACCESSLOG:-true}
-      - --accesslog.filepath=/logs/access.log
-      - --accesslog.bufferingsize=${ACCESSLOG_BUFFERINGSIZE:-100}
-
-      # Prometheus metrics exporter type
-#      - --metrics.prometheus=true
-      # Buckets for latency metrics
-#      - --metrics.prometheus.buckets=0.1,0.3,1.2,5.0
+      # Public HTTP Port:
+      - '80:80'
+      # Public HTTPS Port:
+      - '443:443'
+      # Admin Web Port:
+      - '81:81'
+    # environment:
+    # ### These environment variables should NOT be shown to ANYONE! Not even yo mama or wife (unless she knows how to work MySQL).
+    # ### Make sure to create a process of calling your environment variables from another file like env in Docker.
+    #   DB_MYSQL_HOST: "db"
+    #   DB_MYSQL_PORT: 3306
+    #   DB_MYSQL_USER: "npm"
+    #   DB_MYSQL_PASSWORD: "npm"
+    #   DB_MYSQL_NAME: "npm"
     volumes:
-      - "${CERT_PATH}:/certs"
-      - "${ACME_PATH}:/acme.json"
-      - "${CONFIG_PATH}:/etc/traefik"
-      - "${LOG_PATH:-./logs}:/logs"
-      - "${PROVIDER_ENV_FILE_VALUE}:/provider.key:ro"
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - ./data/nginx-proxy-manager:/data
+      - ./letsencrypt:/etc/letsencrypt
+    depends_on:
+      - db
+  db:
+    image: yobasystems/alpine-mariadb:latest
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 'npm'
+      MYSQL_DATABASE: 'npm'
+      MYSQL_USER: 'npm'
+      MYSQL_PASSWORD: 'npm'
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+
 
 # # 2ND CONTAINER
 #   ### Grafana is a visual platform for monitoring data that is categorized by supported platforms
